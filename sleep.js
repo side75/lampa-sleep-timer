@@ -9,7 +9,7 @@
     if (window.lampa_sleep_timer_plugin) return;
     window.lampa_sleep_timer_plugin = true;
 
-    var VERSION = '1.1.0';
+    var VERSION = '1.2.0';
     var MINUTES = [15, 30, 45, 60, 90];
     var cfg = {
         warn: 60,           // за сколько секунд предупреждать
@@ -18,10 +18,15 @@
         stall: 180,         // видео не на паузе, но не двигается столько секунд — зависло, считаем, что зритель уснул
         ended: 30,          // видео закончилось и столько секунд ничего не началось — срабатываем
         overdue: 120,       // срок прошёл больше чем на столько секунд — устройство спало, таймер просто снимаем
-        closeDelay: 1600    // через сколько мс после затемнения закрывать плеер (пока экран плавно темнеет)
+        closeDelay: 1600,   // через сколько мс после затемнения закрывать плеер (пока экран плавно темнеет)
+        lockDelay: 800,     // через сколько мс после закрытия плеера запускать команду блокировки (успевает сохраниться позиция)
+        lockTest: 10,       // «Проверить блокировку»: через сколько секунд после нажатия запускать команду
+        lockUi: false       // показывать пункты блокировки не только на устройствах Apple (для проверок)
     };
     var LOG_KEY = 'sleep_timer_log';
     var LOG_MAX = 40;
+    var LOCK_KEY = 'sleep_timer_lock';
+    var SHORTCUT = 'LampaLock';     // имя команды в приложении «Команды» с действием «Заблокировать экран»
 
     var mode = 'off';           // 'off' | 'time' | 'episode'
     var deadline = 0;           // для mode === 'time'
@@ -174,6 +179,41 @@
         } catch (e) {}
     }
 
+    // ---------- настоящая блокировка iPad / iPhone через приложение «Команды» ----------
+    // Веб-страница сама заблокировать устройство не может, но может открыть ссылку на команду,
+    // в которой одно действие — «Заблокировать экран».
+
+    function isApple() {
+        if (cfg.lockUi) return true;
+        try { return /iPad|iPhone|iPod|Macintosh/.test(navigator.userAgent) && (navigator.maxTouchPoints || 0) > 0; } catch (e) { return false; }
+    }
+
+    function lockEnabled() {
+        try { return isApple() && window.localStorage.getItem(LOCK_KEY) === '1'; } catch (e) { return false; }
+    }
+
+    function setLock(on) {
+        try { window.localStorage.setItem(LOCK_KEY, on ? '1' : '0'); } catch (e) {}
+        note(on ? 'блокировка планшета включена' : 'блокировка планшета выключена');
+    }
+
+    function lockDevice(src, say) {
+        note('запускаю команду ' + SHORTCUT + ': ' + src);
+        try { window.location.href = 'shortcuts://run-shortcut?name=' + encodeURIComponent(SHORTCUT); }
+        catch (e) { note('команду запустить не удалось: ' + (e && e.message ? e.message : e)); }
+        // Если устройство ушло в «Команды», страница становится скрытой и этот таймер досчитает уже после разблокировки
+        var at = Date.now();
+        setTimeout(function () {
+            var hidden = false;
+            try { hidden = document.visibilityState === 'hidden'; } catch (e) {}
+            if (hidden || Date.now() - at > 8000) note('команда запущена, планшет ушёл из Лампы');
+            else {
+                note('команда НЕ запустилась: Лампа осталась на экране');
+                if (say) notify('Команда ' + SHORTCUT + ' не запустилась');
+            }
+        }, 4000);
+    }
+
     // ---------- кнопка на панели плеера ----------
 
     function panelRoot() {
@@ -221,6 +261,14 @@
             items.push({ title: 'Через ' + MINUTES[i] + ' мин', minutes: MINUTES[i] });
         }
         items.push({ title: 'До конца серии', subtitle: 'Следующая серия не включится', episode: true });
+        if (isApple()) {
+            items.push({
+                title: 'Блокировать планшет: ' + (lockEnabled() ? 'да' : 'нет'),
+                subtitle: 'Нужна команда ' + SHORTCUT + ' в приложении «Команды»',
+                lockToggle: true
+            });
+            items.push({ title: 'Проверить блокировку', subtitle: 'Запустит команду через ' + cfg.lockTest + ' секунд', lockTest: true });
+        }
         items.push({ title: 'Журнал таймера', subtitle: 'Что и когда он делал', log: true });
 
         Lampa.Select.show({
@@ -228,6 +276,16 @@
             items: items,
             onSelect: function (a) {
                 if (a.log) return openLog(back);
+                if (a.lockToggle) {
+                    setLock(!lockEnabled());
+                    notify(lockEnabled() ? 'Таймер сна будет блокировать планшет' : 'Таймер сна не будет блокировать планшет');
+                    return back();
+                }
+                if (a.lockTest) {
+                    notify('Через ' + cfg.lockTest + ' секунд запущу команду ' + SHORTCUT + '. Не трогайте планшет');
+                    setTimeout(function () { lockDevice('проверка', true); }, cfg.lockTest * 1000);
+                    return back();
+                }
                 if (a.off) stop(true);
                 else if (a.episode) start('episode');
                 else start('time', a.minutes);
@@ -414,6 +472,7 @@
             if (!sleeping) return;
             enforce();
             try { if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen(); } catch (e) {}
+            if (lockEnabled()) setTimeout(function () { if (sleeping) lockDevice('таймер сработал', false); }, cfg.lockDelay);
         }, cfg.closeDelay);
 
         // Сторож: всё, что заиграет под затемнением (следующая серия, заставка), сразу останавливается
@@ -471,7 +530,7 @@
             wake: function () { wake('команда'); },
             log: readLog,
             status: function () {
-                return { mode: mode, left: Math.round(secondsLeft()), sleeping: sleeping, stuck: stuckSeconds, buttons: $('.sleep-timer-btn').length };
+                return { mode: mode, left: Math.round(secondsLeft()), sleeping: sleeping, stuck: stuckSeconds, lock: lockEnabled(), buttons: $('.sleep-timer-btn').length };
             },
             // для проверок: позволяет укоротить пороги
             _cfg: function (o) { for (var k in o) if (Object.prototype.hasOwnProperty.call(cfg, k)) cfg[k] = o[k]; return cfg; }
