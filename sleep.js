@@ -9,7 +9,7 @@
     if (window.lampa_sleep_timer_plugin) return;
     window.lampa_sleep_timer_plugin = true;
 
-    var VERSION = '1.2.0';
+    var VERSION = '1.2.1';
     var MINUTES = [15, 30, 45, 60, 90];
     var cfg = {
         warn: 60,           // за сколько секунд предупреждать
@@ -197,21 +197,56 @@
         note(on ? 'блокировка планшета включена' : 'блокировка планшета выключена');
     }
 
+    // Как запущена Лампа: от этого зависит, пустит ли система в «Команды»
+    function envLine() {
+        var p = [];
+        try { p.push('standalone=' + (navigator.standalone === true ? 'да' : 'нет')); } catch (e) {}
+        try { p.push('pwa=' + (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches ? 'да' : 'нет')); } catch (e) {}
+        try { p.push('platform=' + (Lampa.Platform && Lampa.Platform.get ? Lampa.Platform.get() : '?')); } catch (e) {}
+        try { p.push('bridge=' + (window.webkit && window.webkit.messageHandlers ? 'да' : 'нет')); } catch (e) {}
+        try { p.push('safari=' + (/Version\/[0-9.]+.*Safari/.test(navigator.userAgent) ? 'да' : 'нет')); } catch (e) {}
+        try { p.push(location.protocol + '//' + location.host); } catch (e) {}
+        return p.join(', ');
+    }
+
+    var LOCK_WAYS = [
+        ['assign', function (url) { window.location.assign(url); }],
+        ['ссылка', function (url) {
+            var a = document.createElement('a');
+            a.href = url;
+            a.style.display = 'none';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        }],
+        ['open', function (url) { window.open(url, '_blank'); }]
+    ];
+
+    // Пробует открыть команду разными способами по очереди, пока устройство не уйдёт из Лампы
     function lockDevice(src, say) {
-        note('запускаю команду ' + SHORTCUT + ': ' + src);
-        try { window.location.href = 'shortcuts://run-shortcut?name=' + encodeURIComponent(SHORTCUT); }
-        catch (e) { note('команду запустить не удалось: ' + (e && e.message ? e.message : e)); }
-        // Если устройство ушло в «Команды», страница становится скрытой и этот таймер досчитает уже после разблокировки
-        var at = Date.now();
-        setTimeout(function () {
-            var hidden = false;
-            try { hidden = document.visibilityState === 'hidden'; } catch (e) {}
-            if (hidden || Date.now() - at > 8000) note('команда запущена, планшет ушёл из Лампы');
-            else {
+        var url = 'shortcuts://run-shortcut?name=' + encodeURIComponent(SHORTCUT);
+        var i = 0;
+        var last = Date.now();
+        var used = '';
+        note('запускаю команду ' + SHORTCUT + ': ' + src + ' · ' + envLine());
+
+        var step = function () {
+            // Страница скрыта или её таймеры стояли — значит, устройство ушло в «Команды» и заблокировалось
+            var gone = Date.now() - last > 6000;
+            try { if (document.visibilityState === 'hidden') gone = true; } catch (e) {}
+            if (gone) { note('команда запущена (способ: ' + used + '), планшет ушёл из Лампы'); return; }
+            if (i >= LOCK_WAYS.length) {
                 note('команда НЕ запустилась: Лампа осталась на экране');
                 if (say) notify('Команда ' + SHORTCUT + ' не запустилась');
+                return;
             }
-        }, 4000);
+            used = LOCK_WAYS[i][0];
+            try { LOCK_WAYS[i][1](url); } catch (e) { note('способ ' + used + ': ошибка ' + (e && e.message ? e.message : e)); }
+            i++;
+            last = Date.now();
+            setTimeout(step, 2500);
+        };
+        step();
     }
 
     // ---------- кнопка на панели плеера ----------
@@ -268,6 +303,7 @@
                 lockToggle: true
             });
             items.push({ title: 'Проверить блокировку', subtitle: 'Запустит команду через ' + cfg.lockTest + ' секунд', lockTest: true });
+            items.push({ title: 'Заблокировать сейчас', subtitle: 'Запустит команду сразу, по вашему нажатию', lockNow: true });
         }
         items.push({ title: 'Журнал таймера', subtitle: 'Что и когда он делал', log: true });
 
@@ -279,6 +315,10 @@
                 if (a.lockToggle) {
                     setLock(!lockEnabled());
                     notify(lockEnabled() ? 'Таймер сна будет блокировать планшет' : 'Таймер сна не будет блокировать планшет');
+                    return back();
+                }
+                if (a.lockNow) {
+                    lockDevice('по нажатию', true);
                     return back();
                 }
                 if (a.lockTest) {
